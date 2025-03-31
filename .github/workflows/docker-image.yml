@@ -1,46 +1,95 @@
-name: Build and Push Docker Image
+name: Build and Push Docker Image to GHCR
 
 on:
   release:
-    types: [created]
-  workflow_dispatch:
+    types: [created] # Trigger on release creation
+  workflow_dispatch: # Allow manual trigger
     inputs:
       tag:
-        description: 'Tag Name'
+        description: 'Image Tag (e.g., v1.0.0, or specific identifier)' # Input for manual tag
         required: true
+
+# --- NEW: Environment variables for registry and image name ---
+env:
+  REGISTRY: ghcr.io
+  # Automatically uses your GitHub username/org and repo name
+  # Example: ghcr.io/your-username/your-repo-name
+  IMAGE_NAME: ${{ github.repository }}
+# --- End Environment variables ---
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # --- NEW: Permissions required for pushing to GHCR ---
+    permissions:
+      contents: read   # To checkout the code
+      packages: write  # To push packages (Docker images) to GHCR
+    # --- End Permissions ---
+
     steps:
-    - uses: actions/checkout@v2
+    # --- UPDATED: Use actions/checkout@v4 ---
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
+    # --- UPDATED: Use docker/setup-buildx-action@v3 ---
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v1
+      uses: docker/setup-buildx-action@v3
 
-    - name: Login to Docker Hub
-      uses: docker/login-action@v1
+    # --- REPLACED: Login to GHCR instead of Docker Hub ---
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v3 # Use v3
       with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_PASSWORD }}
+        registry: ${{ env.REGISTRY }}      # Use ghcr.io from env var
+        username: ${{ github.actor }}      # Your GitHub username/org
+        password: ${{ secrets.GITHUB_TOKEN }} # Use the auto-generated token
+    # --- End Login replacement ---
 
-    - name: Set tag name
-      id: tag_name
+    # --- UPDATED: Determine base tag and use modern output ---
+    - name: Determine Base Tag
+      id: base_tag # Renamed ID for clarity
       run: |
+        TAG=""
         if [ "${{ github.event_name }}" = "release" ]; then
-          echo "::set-output name=tag::${GITHUB_REF#refs/tags/}"
+          # Extract tag from refs/tags/v1.0.0 -> v1.0.0
+          TAG="${GITHUB_REF#refs/tags/}"
         elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          echo "::set-output name=tag::${{ github.event.inputs.tag }}"
+          TAG="${{ github.event.inputs.tag }}"
+        fi
+        # Use the modern way to set output variables
+        echo "tag=$TAG" >> $GITHUB_OUTPUT
+    # --- End Base Tag determination ---
+
+    # --- NEW: Step to format full GHCR tags ---
+    - name: Format Docker Tags for GHCR
+      id: docker_tags
+      run: |
+        # Get the base tag from the previous step
+        BASE_TAG="${{ steps.base_tag.outputs.tag }}"
+
+        # Basic check if the tag was determined
+        if [ -z "$BASE_TAG" ]; then
+          echo "Error: Base tag could not be determined."
+          exit 1
         fi
 
-    - name: Build and push Docker image with Release tag
-      uses: docker/build-push-action@v2
+        # Construct the full image paths for GHCR
+        # Example: ghcr.io/your-username/your-repo-name:v1.0.0
+        # Example: ghcr.io/your-username/your-repo-name:latest
+        IMAGE_BASE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+
+        # Generate a comma-separated list for the 'tags' input below
+        echo "tags=$(printf '%s\n' "${IMAGE_BASE}:${BASE_TAG}" "${IMAGE_BASE}:latest" | paste -sd ',')" >> $GITHUB_OUTPUT
+    # --- End Tag Formatting step ---
+
+    # --- UPDATED: Build and push step with new tags and action version ---
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5 # Use v5
       with:
         context: .
         file: ./Dockerfile
-        push: true
-        tags: |
-          vinlic/qwen-free-api:${{ steps.tag_name.outputs.tag }}
-          vinlic/qwen-free-api:latest
-        platforms: linux/amd64,linux/arm64
-        build-args: TARGETPLATFORM=${{ matrix.platform }}
+        push: true # Always push on release/dispatch triggers
+        # Use the dynamically generated GHCR tags from the previous step
+        tags: ${{ steps.docker_tags.outputs.tags }}
+        # Keep your platform specifications
+        platforms: linux/amd64,linux/arm64,linux/arm/v7
+        # build-args: TARGETPLATFORM=${{ matrix.platform }} # Still usually not needed here
